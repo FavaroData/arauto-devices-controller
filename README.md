@@ -99,9 +99,8 @@ Rodando sem argumentos, entra num prompt onde você digita comandos em sequênci
 ```bash
 python Cli.py
 ```
-```
-![ArautoDevices/imgs/image.png](imgs/image.png)
-```
+
+![Modo interativo do Arauto Devices](imgs/image.png)
 
 ### Ajuda
 
