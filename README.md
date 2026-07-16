@@ -19,7 +19,7 @@ CLI em Python pra controlar tomadas inteligentes SmartLife/Tuya via Tuya Cloud A
 
 ## Instalação
 
-Crie o ambiente virtual **dentro da pasta do projeto** (não compartilhe o `.venv` entre projetos diferentes):
+Crie o ambiente virtual **dentro da pasta do projeto**:
 
 ```bash
 cd ArautoDevices
