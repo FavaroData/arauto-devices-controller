@@ -17,15 +17,31 @@ CLI (Cli.py)  →  Commands (Commands.py)  →  DeviceController (interface)
               (lê devices.json)            (fala com a Tuya Cloud API)
 ```
 
-**Fluxo**: a CLI recebe, por exemplo, `on AirFrier` → monta um `OnCommand` → o Command pede o `Device` ao `DevicesRepository` → chama `DeviceController.turn_on(device)` → quem executa de fato é o `CloudDeviceController`, que autentica com `tinytuya.Cloud()` e manda o comando pelos servidores da Tuya (mesmo caminho que o app SmartLife usa).
+### Fluxo completo: `on AirFrier` (Exemplo onde seu dispositivo se chama "AirFrier")
 
-**Princípio central**: nenhuma camada superior conhece os detalhes da camada inferior. O `OnCommand` não sabe que existe `tinytuya`, nem se o controller por trás fala com a nuvem ou com o IP local. O `DevicesRepository` não sabe controlar dispositivo nenhum, só carrega dados. Essa separação é o que permitiu a troca de local pra cloud: só a linha que instancia o controller em `Cli.py` mudou (`TuyaDeviceController()` → `CloudDeviceController()`); `Command`, `DevicesRepository` e `Device` continuaram intactos.
+Você digita `on AirFrier` no shell, ou roda `python Cli.py on AirFrier` direto no terminal. Isso não liga a tomada na hora — o comando passa por quatro arquivos do projeto antes de qualquer coisa sair da sua máquina: `Cli.py`, `Commands.py`, `DevicesRepository.py` e `CloudController.py`.
+
+Primeiro, o `Cli.py` pega o texto digitado e usa o `argparse` pra separar em `cmd = "on"` e `nome = "AirFrier"`. Com isso, ele monta um objeto `OnCommand`, passando pra ele o `controller` e o `repo` que já tinham sido criados no início do `main()`. O `OnCommand` em si não sabe ler arquivo nem falar com a Tuya — ele só organiza a sequência de passos.
+
+O primeiro passo do `OnCommand.execute()` é pedir o dispositivo pro `DevicesRepository`, chamando `get_by_name("AirFrier")`. O repositório abre o `devices.json`, lê o conteúdo e devolve um objeto `Device` com nome, IP, ID e chave local daquele dispositivo. Se o nome não existir no arquivo, ele levanta `DeviceNotFoundError` e o comando para ali mesmo, sem chegar perto da rede.
+
+Com o `Device` em mãos, o `OnCommand` chama `is_online(device)` pra confirmar que o dispositivo está acessível, e `get_status(device)` pra ver se ele já não está ligado (evitando mandar o comando à toa). Só depois dessas duas checagens é que `turn_on(device)` roda de verdade.
+
+É nesse ponto que a execução sai da sua máquina. `CloudDeviceController.turn_on()` delega pra `_send_switch()`, que monta o payload:
+
+```json
+{"commands": [{"code": "switch_1", "value": true}]}
+```
+
+e chama `self._cloud.sendcommand(device.id, commands)`. Esse `self._cloud` é a instância de `tinytuya.Cloud()` criada quando o `CloudDeviceController` foi instanciado, e ela já carrega as credenciais (`apiKey`/`apiSecret`) do `tinytuya.json`, cuidando da autenticação sozinha.
+
+Dali em diante, quem processa o comando são os servidores da Tuya, os mesmos que o app SmartLife usa no celular. A tomada nunca recebe nada direto de você: ela fica conectada via WiFi nos servidores da Tuya o tempo todo, esperando comandos chegarem de lá. O app SmartLife e essa CLI são só dois clientes diferentes batendo na mesma API.
 
 ## Local vs Cloud
 
 O projeto tem duas implementações de `DeviceController`, cumprindo o mesmo contrato:
 
-| | `CloudController.py` (em uso) | `TuyaController.py` (implementado, não usado por padrão) |
+| | `CloudController.py` (em uso) | `TuyaController.py` (implementado, não usado) |
 |---|---|---|
 | Caminho de comunicação | Servidores da Tuya (HTTP) | Direto no IP do dispositivo (LAN) |
 | Alcance | Qualquer lugar com internet | Só na mesma rede local |
@@ -59,17 +75,21 @@ class Device:
         self.version = version
 ```
 
-Não tem comportamento, só carrega dados.
+`Device` é a classe mais simples do projeto. Ela guarda os cinco atributos que identificam uma tomada (`name`, `id`, `ip`, `local_key`, `version`) e não tem nenhum método além do `__init__`. Não valida nada, não decide nada sozinha, não fala com arquivo nem com rede.
+
+Pense nela como um envelope: o `DevicesRepository` lê o `devices.json` e preenche esse envelope, e cada camada seguinte (`Commands`, `CloudController`) só lê o que está dentro, sem alterar. É esse mesmo objeto que atravessa toda a cadeia descrita no fluxo acima, do `Cli.py` até a chamada real na Tuya Cloud.
 
 ### `DevicesRepository.py`
 
-Única responsabilidade: ler o `devices.json` e devolver objetos `Device`. A tradução de nomes acontece só aqui — o JSON usa `"key"` (formato exigido pelo tinytuya), guardado como `local_key` no `Device`:
+Única responsabilidade: ler o `devices.json` e devolver objetos `Device`. Não fala com a Tuya, não sabe ligar nem desligar nada, só traduz o que está no arquivo pra um formato que o resto do projeto entende.
+
+Essa tradução de nomes acontece só aqui, e existe por um motivo específico: o `devices.json` usa a chave `"key"` (nome que o `tinytuya wizard` gera automaticamente), mas dentro do projeto esse valor vira `local_key` no objeto `Device`. Deixar essa tradução concentrada num único lugar evita que o resto do código precise saber que esse desalinhamento de nomes existe:
 
 ```python
 local_key=item["key"],
 ```
 
-Se o campo `"ip"` não existir no JSON (dispositivo nunca visto online), usa `"Auto"` como padrão, deixando o `tinytuya` descobrir o IP em tempo real:
+Também é aqui que fica a única regra de fallback do projeto. Se o campo `"ip"` não existir no JSON (o que acontece quando o dispositivo nunca foi visto online durante o wizard), o repositório usa `"Auto"` no lugar, deixando o `tinytuya` descobrir o IP sozinho na hora de falar com o dispositivo:
 
 ```python
 ip=item.get("ip", "Auto"),
@@ -85,35 +105,43 @@ class DeviceController(ABC):
     def turn_off(self, device: Device) -> None: ...
     @abstractmethod
     def get_status(self, device: Device) -> dict: ...
+    @abstractmethod
+    def is_online(self, device: Device) -> bool: ...
 ```
 
-Define o contrato — qualquer coisa que controla um dispositivo sabe fazer essas 3 coisas. `ABC` + `@abstractmethod` impedem instanciar essa classe diretamente, e barram na hora de criar qualquer subclasse que esqueça de implementar algum dos três métodos.
+Define o contrato: qualquer coisa que controla um dispositivo sabe fazer essas quatro coisas. `ABC` + `@abstractmethod` impedem instanciar essa classe diretamente, e barram na hora de criar qualquer subclasse que esqueça de implementar algum dos quatro métodos. O Python levanta `TypeError` na hora de instanciar, não em tempo de importação.
+
+`is_online` é o mais recente dos quatro. Ele nasceu de um problema real: `get_status()` devolve o último `switch_1` conhecido, que pode estar desatualizado se o dispositivo caiu da rede depois da última vez que respondeu. Sem um jeito de confirmar conectividade de verdade, tanto o comando `list` (que precisa mostrar Online/Offline) quanto `on`/`off` (que precisam decidir se confiam num "já está ligado" cacheado) ficariam expostos a esse dado velho.
+
+Como o contrato é compartilhado pelas três implementações do projeto (`CloudController`, `TuyaController`, `FakeDeviceController`), adicionar `is_online` aqui obrigou as três a implementar o método, mesmo a `TuyaController`, que não estava em uso no momento da mudança.
 
 ### `CloudController.py` (em uso)
 
-Fala com a Tuya Cloud API via `tinytuya.Cloud()` (que lê `apiKey`/`apiSecret` do `tinytuya.json` automaticamente). Duas decisões não óbvias aqui:
+Fala com a Tuya Cloud API via `tinytuya.Cloud()`, que lê `apiKey`/`apiSecret` do `tinytuya.json` sozinho, sem precisar passar nada explicitamente no construtor. Duas decisões desse arquivo não são óbvias só de ler o código, e vale explicar o porquê de cada uma.
 
-**Normalização de formato** — a Cloud API devolve status como `{"result": [{"code": "switch_1", "value": True}, ...]}`, diferente do formato `{"dps": {...}}` que o modo local usa. `get_status` traduz um pro outro, mantendo o mesmo contrato de saída pros dois controllers:
+**Normalização de formato.** A Cloud API devolve o status de um dispositivo como `{"result": [{"code": "switch_1", "value": True}, ...]}`, um formato completamente diferente do `{"dps": {...}}` que o modo local (`TuyaController.py`) usa. Se cada camada de cima tivesse que saber qual desses dois formatos está recebendo, o resto do projeto ficaria acoplado a um detalhe de implementação da Tuya. Por isso `get_status` traduz um formato pro outro internamente, mantendo a mesma saída pros dois controllers:
 
 ```python
 items = result.get("result", []) if isinstance(result, dict) else []
 return {"dps": {item["code"]: item["value"] for item in items}}
 ```
 
-**Checagem de online antes de comandar** — a Cloud API retorna `"success": True` mesmo com o dispositivo desligado/offline (ela só confirma que o comando foi recebido pelos servidores da Tuya, não que foi executado). Por isso `_send_switch` consulta `_is_online` antes de mandar o comando, evitando reportar "LIGADO" quando o dispositivo nem está acessível:
+**Checagem de online antes de comandar.** A Cloud API tem um comportamento enganoso: ela retorna `"success": True` mesmo quando o dispositivo está desligado da energia ou fora da rede. Esse `"success"` só confirma que o comando chegou nos servidores da Tuya, não que a tomada realmente executou. Sem checar isso antes, a aplicação relataria "LIGADO" pro usuário mesmo com a tomada fisicamente desconectada, comportamento que já foi reproduzido em teste durante o desenvolvimento. Por isso `_send_switch` chama `is_online` antes de mandar qualquer comando:
 
 ```python
 def _send_switch(self, device: Device, ligar: bool) -> None:
-    if not self._is_online(device):
+    if not self.is_online(device):
         raise DeviceControllerError("Dispositivo está offline — comando não será entregue agora.")
     # ...envia o comando
 ```
 
-Essa checagem custa uma chamada HTTP extra por comando (status + comando, em vez de só comando) — uma simplificação deliberada aceita pelo uso pessoal do projeto; se a quota da conta Trial virar problema, o próximo passo seria cachear `_is_online` com um TTL curto.
+Essa checagem tem um custo: dobra o número de chamadas HTTP por comando, já que agora são duas requisições (checar status, depois enviar) em vez de uma só. É uma simplificação aceita de propósito, pensando em uso pessoal esporádico dentro da quota de uma conta Trial. Se essa quota virar um problema real, o próximo passo natural seria cachear o resultado de `is_online` por alguns segundos, em vez de consultar a API a cada chamada.
 
 ### `TuyaController.py` (implementado, não usado por padrão)
 
-Implementação alternativa via API local — fala direto com o IP do dispositivo na rede, sem depender da nuvem. É a única classe que faz `import tinytuya` no sentido "protocolo local" (`tinytuya.Device`, não `tinytuya.Cloud`). Captura falhas de conexão (incluindo erro na própria descoberta do dispositivo) e relança como `DeviceControllerError`:
+Implementação alternativa via API local. Fala direto com o IP do dispositivo na rede, sem depender da nuvem, e é a única classe do projeto que usa `tinytuya` no sentido "protocolo local" (`tinytuya.Device`, em vez de `tinytuya.Cloud`, que é o que o `CloudController.py` usa).
+
+Toda operação passa primeiro por `_connect()`, que monta um `tinytuya.Device` com o IP, a `local_key` e a versão de protocolo daquele dispositivo específico. Se a conexão falhar (dispositivo desligado, fora da rede, ou credencial errada), `tinytuya` levanta um `RuntimeError` genérico, e `_connect()` traduz isso pra `DeviceControllerError`, mantendo o mesmo contrato de erro que o resto do projeto já espera:
 
 ```python
 try:
@@ -122,15 +150,47 @@ except RuntimeError as e:
     raise DeviceControllerError(f"Dispositivo não encontrado na rede: {e}")
 ```
 
-Mantida no projeto como alternativa — trocar de volta pro modo local é só voltar a instanciar `TuyaDeviceController()` em vez de `CloudDeviceController()` no `Cli.py`.
+Como esse controller não tem acesso a nenhum endpoint tipo o `cloudrequest` da Tuya Cloud, ele não tem como perguntar "esse dispositivo está online?" sem tentar falar com ele de verdade. Por isso `is_online()` aqui funciona diferente do `CloudController`: em vez de consultar um status separado, ele tenta se conectar e ler o status do dispositivo, devolvendo `True` ou `False` dependendo se essa tentativa deu certo, sem deixar a exceção estourar pra fora:
+
+```python
+def is_online(self, device: Device) -> bool:
+    try:
+        d = self._connect(device)
+        result = d.status()
+        return isinstance(result, dict) and "Error" not in result
+    except DeviceControllerError:
+        return False
+```
+
+Mantida no projeto como alternativa, não como código morto: trocar de volta pro modo local é só voltar a instanciar `TuyaDeviceController()` em vez de `CloudDeviceController()` no `Cli.py`. Foi essa mesma classe que ficou desatualizada quando `is_online` entrou na interface `DeviceController`: toda subclasse de uma `ABC` precisa implementar todos os métodos abstratos, senão a instanciação falha com `TypeError`.
 
 ### `Commands.py`
 
-Cada ação vira uma classe própria, recebendo só o que precisa via injeção de dependência (`ListCommand`, por exemplo, não recebe `controller`, já que listar não fala com hardware nenhum). Cada `execute()` trata separadamente `DeviceNotFoundError` (nome não existe no JSON) e `DeviceControllerError` (falha ao falar com o dispositivo real), imprimindo mensagem clara em vez de deixar o traceback estourar.
+Cada ação da CLI vira uma classe própria (`OnCommand`, `OffCommand`, `StatusCommand`, `ListCommand`), recebendo só o que precisa via injeção de dependência. A maioria segue o mesmo formato: pede o `Device` pro repositório e chama o `controller` pra agir. `ListCommand` também recebe `controller` hoje, porque listar dispositivos inclui testar a conexão de cada um (ver mais abaixo).
+
+`OnCommand` e `OffCommand` têm uma lógica de no-op: antes de mandar o comando de verdade, eles checam se o dispositivo já está no estado desejado, pra não gastar uma chamada à toa. Essa checagem não usa só o `switch_1` que vem de `get_status()`, porque esse valor pode ser um dado cacheado, potencialmente desatualizado se o dispositivo caiu da rede depois da última vez que esteve online. Por isso o comando também chama `is_online()`, e só aceita o atalho de "já está LIGADO/DESLIGADO" quando as duas informações batem:
+
+```python
+online = self.controller.is_online(device)
+status = self.controller.get_status(device)
+if online and status.get("dps", {}).get("switch_1") is True:
+    print(f"{Fore.YELLOW}'{device.name}' já está LIGADO")
+    return
+```
+
+Cada `execute()` trata dois tipos de erro separadamente: `DeviceNotFoundError` (o nome digitado não existe no `devices.json`) e `DeviceControllerError` (o nome existe, mas alguma coisa falhou ao tentar falar com o dispositivo de verdade). Os dois viram mensagem de erro colorida pro usuário, sem deixar o traceback estourar no terminal.
+
+`ListCommand` segue essa mesma ideia de testar antes de confiar: pra cada dispositivo cadastrado, ela chama `is_online()` e monta uma coluna de Status (Online em verde, Offline em vermelho) junto com nome, IP e ID. Se `is_online()` levantar `DeviceControllerError` pra um dispositivo específico, por exemplo por falha de rede naquela consulta, a linha dele é tratada como Offline em vez de derrubar a listagem inteira.
 
 ### `Cli.py`
 
-Faz parsing via `argparse` com subcomandos (`list`, `on`, `off`, `status`). Quando rodado sem argumentos, entra em modo interativo (shell), reaproveitando o mesmo `DevicesRepository` e `CloudDeviceController` a cada comando digitado, sem recriar as peças a cada linha. É o único arquivo que precisou mudar na troca de local pra cloud — a linha `controller = TuyaDeviceController()` virou `controller = CloudDeviceController()`.
+Faz o parsing dos argumentos via `argparse`, com subcomandos pra `list`, `on`, `off` e `status` (cada um definido em `build_parser()`). Quando você roda `python Cli.py` sem nenhum argumento, ele entra em modo interativo (shell) em vez de pedir ajuda ou dar erro, porque `add_subparsers` foi criado com `required=False` de propósito.
+
+Antes de fazer qualquer coisa, `main()` chama `_connect_cloud()`, que tenta instanciar `CloudDeviceController()` e, junto com ele, autenticar na Tuya Cloud. Se não tiver internet, essa chamada falha com `requests.exceptions.ConnectionError`, e em vez de deixar o traceback estourar, `_connect_cloud()` tenta de novo a cada `RETRY_DELAY` segundos (5, por padrão), até `MAX_RETRIES` vezes (10). Esgotadas as tentativas, imprime um erro final e encerra com `sys.exit(1)` em vez de entrar no shell com uma conexão que não existe.
+
+No modo interativo, `run_shell()` reaproveita o mesmo `DevicesRepository` e o mesmo `controller` a cada linha digitada, sem recriar nada entre comandos. Ele mostra o banner (`_print_banner()`, com a arte ASCII e a caixa desenhada com caracteres Unicode) e a lista de comandos (`_print_help()`) só uma vez, no início, mas o comando `help` digitado a qualquer momento reimprime essa lista sem precisar reiniciar o shell. O loop principal captura `SystemExit` (que o `argparse` levanta em erro de parsing) pra não derrubar o shell inteiro por causa de um comando digitado errado.
+
+Trocar de cloud pra local continua sendo uma mudança pequena, mas hoje ela mora dentro de `_connect_cloud()`: em vez de `CloudDeviceController()`, bastaria instanciar `TuyaDeviceController()` ali, perdendo, claro, a lógica de retry, que só faz sentido pra uma conexão de rede real.
 
 ## Testes
 

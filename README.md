@@ -25,22 +25,6 @@ Crie o ambiente virtual **dentro da pasta do projeto** (não compartilhe o `.ven
 cd ArautoDevices
 python -m venv .venv
 source .venv/bin/activate
-pip install tinytuya
-```
-
-### Reproduzindo o ambiente em outra máquina
-
-Depois de instalar as dependências, gera um `requirements.txt` pra deixar o ambiente reproduzível sem precisar versionar o `.venv` em si:
-
-```bash
-pip freeze > requirements.txt
-```
-
-Em qualquer outra máquina (ou depois de clonar o repositório), basta:
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
@@ -62,7 +46,7 @@ A configuração acontece em três etapas: parear a tomada no app, vincular a co
 4. Confirma no celular — isso vincula os dispositivos da sua conta SmartLife ao projeto
 5. Na aba **Authorization**, anota o **API Key (Client ID)** e o **API Secret (Client Secret)** do projeto
 
-### 3. Gerar o `devices.json` com o tinytuya wizard
+### 3. Gerar o `devices.json` com o tinytuya wizard (Execute dentro da pasta `arauto-devices/src`)
 
 ```bash
 python -m tinytuya wizard
@@ -87,13 +71,13 @@ Isso gera um `devices.json` na pasta atual, com o formato:
 ]
 ```
 
-Move (ou copia) esse arquivo pra dentro da pasta do projeto (`src/arauto-devices/`), junto dos módulos Python.
+Move (ou copia) esse arquivo pra dentro da pasta do projeto (`arauto-devices/src/`), junto dos demais módulos.
 
 > **Se o dispositivo aparecer sem `"ip"`** (mensagem `No IP found` no wizard): não é bloqueante no modo cloud — os campos `"ip"` e `"key"` (local key) não são usados pra controlar o dispositivo nesse modo, só o `"id"` importa. Eles continuam no arquivo por serem gerados automaticamente pelo wizard, mas ficam ociosos.
 
 ### 4. Confirmar o `tinytuya.json` (credenciais da Cloud API)
 
-O mesmo `tinytuya wizard` do passo anterior também gera um `tinytuya.json` na pasta atual, com `apiKey`, `apiSecret` e região — é esse arquivo que o modo cloud usa pra autenticar a cada chamada. Confirma que ele está na mesma pasta dos módulos Python (`src/arauto-devices/`), junto do `devices.json`.
+O mesmo `tinytuya wizard` do passo anterior também gera um `tinytuya.json` na pasta atual, com `apiKey`, `apiSecret` e região — é esse arquivo que o modo cloud usa pra autenticar a cada chamada. Confirma que ele está na mesma pasta dos módulos Python (`arauto-devices/src/`), junto do `devices.json`.
 
 Esse arquivo é tão sensível quanto o `devices.json` (dá acesso de controle à sua conta Tuya) — mantém ele fora do controle de versão (ver seção de Segurança).
 
@@ -116,11 +100,7 @@ Rodando sem argumentos, entra num prompt onde você digita comandos em sequênci
 python Cli.py
 ```
 ```
-Modo interativo — digite um comando (list, on <nome>, off <nome>, status <nome>, exit)
->> list
->> status AirFrier
->> on AirFrier
->> exit
+![ArautoDevices/imgs/image.png](imgs/image.png)
 ```
 
 ### Ajuda
@@ -139,19 +119,3 @@ Camadas separadas por Command + Adapter + Repository, com injeção de dependên
 No modo cloud (padrão atual), o arquivo mais sensível é o **`tinytuya.json`** — ele contém `apiKey`/`apiSecret`, que dão controle total sobre os dispositivos vinculados à sua conta Tuya IoT Platform, de qualquer lugar com internet (não só na sua rede local, diferente da `local_key` do modo local). Trata esse arquivo com o mesmo cuidado que uma senha de conta.
 
 O `devices.json` continua guardando `id`, `key` (local key) e `ip` — não usados pelo modo cloud, mas mantidos porque o wizard gera tudo junto. Se algum dia você voltar a usar o modo local (`TuyaController.py`), esses campos voltam a importar.
-
-Não versiona nenhum dos dois em repositórios públicos. Se precisar compartilhar prints de tela ou colar em algum lugar, revoga e gera credenciais novas depois por precaução — tanto o API Secret quanto a `local_key` (essa última resetando e repareando o dispositivo).
-
-Crie um `.gitignore` na raiz do projeto com pelo menos:
-
-```
-.venv/
-devices.json
-tinytuya.json
-snapshot.json
-tuya-raw.json
-__pycache__/
-*.pyc
-```
-
-O `.venv/` fica de fora porque é recriável a qualquer momento com `requirements.txt` (ver seção de Instalação) — versionar a pasta inteira deixaria o repositório pesado e amarrado ao seu sistema operacional específico.
